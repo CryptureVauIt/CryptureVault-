@@ -24,18 +24,25 @@ Maintains historical token behavior logs to refine future alerts and detect evol
 
 ### 🔹 Q3 2025 — Locking Foundations
 ✅ **Core Systems**: Send, Swap, Vault View, Activity Log
+
 ✅ **VaultKey Access System**: Discord-synced control layer for gated access
+
 ✅ **Real-Time AI Risk Tags**: Dynamic tagging for all wallet tokens
+
 ⚠️ **Behavior Map (Beta)**: Early signals of wallet dominance and anomalies
 
 ### 🔸 Q4 2025 — Broadening the Vault
 🔗 **Multi-Wallet Support**: Manage multiple Solana addresses from a single interface
+
 🌐 **Cross-Chain Watchlist**: Monitor EVM-based tokens with unified risk tagging
+
 📊 **Visual Intelligence**: Animated views of risk shifts and whale movement traces
 
 ### 🔮 Q1 2026 — Predictive Defense
 🧠 **Pattern Recognition Engine**: Detects pump loops and rug setups before they unfold
+
 🎭 **Sentiment Pulse**: Real-time analysis of fear and greed signals from token activity
+
 🗳 **Governance Access**: Community-driven feature evolution through $CRYPTURE voting
 
 ---
