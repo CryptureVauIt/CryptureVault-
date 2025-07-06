@@ -1,36 +1,56 @@
-
-type TokenHolding = {
+export interface TokenHolding {
   symbol: string
   amount: number
   priceUsd: number
 }
 
-type TokenDistribution = {
+export interface TokenDistribution {
   symbol: string
   valueUsd: number
   percentage: number
 }
 
-/**
- * Calculates token distribution in a wallet by USD value.
- */
-export function calculateTokenDistribution(holdings: TokenHolding[]): TokenDistribution[] {
-  const totalValue = holdings.reduce((sum, token) => sum + token.amount * token.priceUsd, 0)
 
+export function calculateTokenDistribution(
+  holdings: TokenHolding[],
+  options: { sort?: boolean; minUsd?: number } = {}
+): TokenDistribution[] {
+  const { sort = true, minUsd = 0 } = options
+
+  // Compute value for each holding
+  const distributions = holdings
+    .map(({ symbol, amount, priceUsd }) => {
+      const value = amount * priceUsd
+      return {
+        symbol,
+        valueUsd: Math.round(value * 100) / 100,
+        rawValue: value,
+      }
+    })
+    // Filter out negligible values
+    .filter(d => d.rawValue >= minUsd)
+
+  // Compute total of filtered values
+  const totalValue = distributions.reduce((sum, d) => sum + d.rawValue, 0)
+
+  // If total is zero, return zeros for all original symbols (filtered or not)
   if (totalValue === 0) {
-    return holdings.map(t => ({
-      symbol: t.symbol,
+    return holdings.map(h => ({
+      symbol: h.symbol,
       valueUsd: 0,
-      percentage: 0
+      percentage: 0,
     }))
   }
 
-  return holdings.map(token => {
-    const value = token.amount * token.priceUsd
-    return {
-      symbol: token.symbol,
-      valueUsd: parseFloat(value.toFixed(2)),
-      percentage: parseFloat(((value / totalValue) * 100).toFixed(2))
-    }
-  })
+  // Calculate percentage and drop rawValue
+  const result: TokenDistribution[] = distributions.map(d => ({
+    symbol: d.symbol,
+    valueUsd: d.valueUsd,
+    percentage: Math.round((d.rawValue / totalValue) * 10000) / 100,
+  }))
+
+  // Optionally sort by descending percentage
+  return sort
+    ? result.sort((a, b) => b.percentage - a.percentage)
+    : result
 }
