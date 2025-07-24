@@ -1,53 +1,55 @@
-import { z } from "zod"
+import { z, ZodError } from "zod"
 import { PublicKey } from "@solana/web3.js"
 
 /**
- * Input schema for watching link (transfer) events between two addresses
+ * Zod schema for a valid Solana public key string → transforms into a PublicKey
  */
-export const watchLinkQuerySchema = z.object({
-  /**
-   * The sender wallet address to watch for outgoing transfers
-   */
-  sourceAddress: z
-    .string()
-    .min(32, "too short")
-    .max(44, "too long")
-    .regex(/^[1-9A-HJ-NP-Za-km-z]+$/, "invalid Base58"),
+const PublicKeySchema = z
+  .string()
+  .min(32, "too short")
+  .max(44, "too long")
+  .refine((s) => {
+    try {
+      new PublicKey(s)
+      return true
+    } catch {
+      return false
+    }
+  }, "invalid Solana public key")
+  .transform((s) => new PublicKey(s))
 
-  /**
-   * The recipient wallet address to filter incoming transfers
-   */
-  destinationAddress: z
-    .string()
-    .min(32, "too short")
-    .max(44, "too long")
-    .regex(/^[1-9A-HJ-NP-Za-km-z]+$/, "invalid Base58"),
+/**
+ * Input schema for watching transfer (“link”) events between two addresses
+ */
+export const watchLinkQuerySchema = z
+  .object({
+    /** Wallet address sending outgoing transfers */
+    sourceAddress: PublicKeySchema,
 
-  /**
-   * Minimum lamports to consider a link event
-   */
-  minLamports: z.number().int().nonnegative().default(0),
+    /** Wallet address receiving incoming transfers */
+    destinationAddress: PublicKeySchema,
 
-  /**
-   * Cluster to connect to
-   */
-  network: z.enum(["mainnet", "devnet"]).default("mainnet"),
-})
+    /** Minimum lamports to consider a link event */
+    minLamports: z.number().int().nonnegative().default(0),
+
+    /** Cluster to connect to */
+    network: z.enum(["mainnet", "devnet"]).default("mainnet"),
+  })
+  .describe("Parameters for filtering transfer events between two wallets")
 
 export type WatchLinkQuery = z.infer<typeof watchLinkQuerySchema>
 
 /**
- * Validates and parses raw input into a WatchLinkQuery
+ * Parse & validate raw input into a WatchLinkQuery
+ * @throws ZodError containing detailed issues
  */
 export function parseWatchLinkQuery(input: unknown): WatchLinkQuery {
-  const res = watchLinkQuerySchema.safeParse(input)
-  if (!res.success) {
-    const msg = res.error.issues
-      .map((i) => `${i.path.join(".")}: ${i.message}`)
-      .join("; ")
-    throw new Error(`Invalid watch link query: ${msg}`)
+  const parsed = watchLinkQuerySchema.safeParse(input)
+  if (!parsed.success) {
+    // rethrow full ZodError so callers can inspect `issues`
+    throw parsed.error
   }
-  return res.data
+  return parsed.data
 }
 
 /**
@@ -56,18 +58,7 @@ export function parseWatchLinkQuery(input: unknown): WatchLinkQuery {
 export interface LinkEvent {
   signature: string
   slot: number
-  source: string
-  destination: string
+  source: PublicKey
+  destination: PublicKey
   lamports: number
-}
-
-/**
- * Helper to convert a base58 string into a PublicKey or throw
- */
-export function toPublicKey(addr: string): PublicKey {
-  try {
-    return new PublicKey(addr)
-  } catch {
-    throw new Error(`Invalid public key: ${addr}`)
-  }
 }
