@@ -1,4 +1,4 @@
-import { Connection, PublicKey } from "@solana/web3.js"
+import { Connection, PublicKey, Commitment } from "@solana/web3.js"
 import { EventEmitter } from "events"
 import {
   pushFlowConfigSchema,
@@ -13,63 +13,107 @@ import {
  */
 export class PushFlowService extends EventEmitter {
   private connection: Connection
-  private commitment: PushFlowConfig["commitment"]
+  private commitment: Commitment
+  private listeners = new Map<string, number>()
 
   constructor(rawConfig: unknown) {
     super()
-    const { endpoint, commitment } = pushFlowConfigSchema.parse(rawConfig)
+    const { endpoint, commitment }: PushFlowConfig = pushFlowConfigSchema.parse(rawConfig)
     this.connection = new Connection(endpoint, commitment)
     this.commitment = commitment
+    process.once('beforeExit', () => this.stopAll())
   }
 
   /**
-   * Start streaming instruction events for the given program
+   * Start streaming instruction events for a program
+   * Emits 'started' and 'flow' events, and 'error:<programId>' on errors
    */
-  public async start(rawParams: unknown): Promise<void> {
+  public start(rawParams: unknown): string {
     const { programId, instructionFilters }: PushFlowParams =
       pushFlowParamsSchema.parse(rawParams)
+    const key = programId.toString()
+    if (this.listeners.has(key)) {
+      throw new Error(`Listener already running for program ${key}`)
+    }
     const programKey = new PublicKey(programId)
 
-    this.connection.onLogs(
+    const listenerId = this.connection.onLogs(
       programKey,
       async (logInfo) => {
-        const { signature, logs } = logInfo
-        let slot = -1
         try {
-          const status = await this.connection.getSignatureStatuses([signature], { searchTransactionHistory: true })
-          slot = status.value[0]?.slot ?? -1
-        } catch {
-          // fallback if status unavailable
-        }
+          const { signature, logs } = logInfo
+          let slot = -1
+          try {
+            const status = await this.connection.getSignatureStatuses(
+              [signature],
+              { searchTransactionHistory: true }
+            )
+            slot = status.value[0]?.slot ?? -1
+          } catch {
+            // fallback if status unavailable
+          }
 
-        for (const line of logs) {
-          // Example log format: "Program log: Instruction: transfer { ... }"
-          const prefix = "Instruction: "
-          const idx = line.indexOf(prefix)
-          if (idx !== -1) {
+          for (const line of logs) {
+            const prefix = "Instruction: "
+            const idx = line.indexOf(prefix)
+            if (idx === -1) continue
+
             const raw = line.slice(idx + prefix.length)
-            const [instr, payload] = raw.split(" ", 2)
+            const [instr, ...rest] = raw.split(/\s+/, 2)
             if (instructionFilters && !instructionFilters.includes(instr)) {
               continue
             }
-            let data: Record<string, unknown> = {}
+
+            let data: Record<string, unknown>
+            const payload = rest.join(' ')
             try {
               data = JSON.parse(payload)
             } catch {
-              // non-JSON payloads can be captured as raw
               data = { raw: payload }
             }
-            const evt: PushFlowEvent = {
-              signature,
-              slot,
-              instruction: instr,
-              data,
-            }
+
+            const evt: PushFlowEvent = { signature, slot, instruction: instr, data }
             this.emit("flow", evt)
           }
+        } catch (err) {
+          this.emit(`error:${key}`, err)
         }
       },
       this.commitment
     )
+
+    this.listeners.set(key, listenerId)
+    this.emit("started", key)
+    return key
+  }
+
+  /**
+   * Stop streaming for a given program
+   */
+  public stop(programId: string): boolean {
+    const listenerId = this.listeners.get(programId)
+    if (!listenerId) return false
+    this.connection.removeOnLogsListener(listenerId)
+    this.listeners.delete(programId)
+    this.emit("stopped", programId)
+    return true
+  }
+
+  /**
+   * Stop all active listeners
+   */
+  public stopAll(): void {
+    for (const [programId, listenerId] of this.listeners) {
+      this.connection.removeOnLogsListener(listenerId)
+      this.emit("stopped", programId)
+    }
+    this.listeners.clear()
+  }
+
+  /**
+   * Get list of active program listeners
+   */
+  public listActive(): string[] {
+    return Array.from(this.listeners.keys())
   }
 }
