@@ -1,69 +1,77 @@
 import { z } from "zod"
 
 /**
- * Schema for validating a shift log query request
+ * Raw input schema for shift log queries:
+ * - either `pageToken` (opaque cursor) or `pagination` may be provided
  */
-export const shiftLogQuerySchema = z.object({
-  /**
-   * ID of the user whose shift logs are requested
-   */
-  userId: z
-    .string()
-    .uuid("userId must be a valid UUID"),
+const shiftLogQueryRawSchema = z
+  .object({
+    userId: z.string().uuid("userId must be a valid UUID"),
+    dateRange: z
+      .object({
+        from: z
+          .string()
+          .refine((s) => !isNaN(Date.parse(s)), "invalid from date")
+          .transform((s) => new Date(s)),
+        to: z
+          .string()
+          .refine((s) => !isNaN(Date.parse(s)), "invalid to date")
+          .transform((s) => new Date(s)),
+      })
+      .refine(({ from, to }) => from <= to, {
+        message: "from date must be before or equal to to date",
+        path: ["dateRange"],
+      }),
+    pagination: z
+      .object({
+        page: z.number().int().positive().default(1),
+        pageSize: z.number().int().positive().max(100).default(25),
+      })
+      .optional(),
+    pageToken: z.string().optional(),
+    taskFilter: z.string().min(1).max(50).optional(),
+  })
+  .refine(
+    (data) => !(data.pageToken && data.pagination),
+    "Provide either pageToken or pagination, not both"
+  )
 
-  /**
-   * Date range for filtering shift logs
-   */
-  dateRange: z
-    .object({
-      from: z
-        .string()
-        .refine((s) => !isNaN(Date.parse(s)), "invalid from date")
-        .transform((s) => new Date(s)),
-      to: z
-        .string()
-        .refine((s) => !isNaN(Date.parse(s)), "invalid to date")
-        .transform((s) => new Date(s)),
-    })
-    .refine(
-      ({ from, to }) => from <= to,
-      "from date must be before or equal to to date"
-    ),
+export type ShiftLogQueryRaw = z.infer<typeof shiftLogQueryRawSchema>
 
-  /**
-   * Pagination options
-   */
-  pagination: z
-    .object({
-      page: z.number().int().positive().default(1),
-      pageSize: z.number().int().positive().max(100).default(25),
-    })
-    .optional(),
-
-  /**
-   * Optional filter for specific tasks performed during the shift
-   */
-  taskFilter: z
-    .string()
-    .min(1)
-    .max(50)
-    .optional(),
-})
-
-export type ShiftLogQuery = z.infer<typeof shiftLogQuerySchema>
+export interface ShiftLogQuery {
+  userId: string
+  dateRange: { from: Date; to: Date }
+  page: number
+  pageSize: number
+  taskFilter?: string
+}
 
 /**
- * Parses and validates user input into a ShiftLogQuery
+ * Parses and validates user input into a structured ShiftLogQuery,
+ * decoding `pageToken` if present.
  */
 export function parseShiftLogQuery(input: unknown): ShiftLogQuery {
-  const result = shiftLogQuerySchema.safeParse(input)
+  const result = shiftLogQueryRawSchema.safeParse(input)
   if (!result.success) {
     const messages = result.error.issues
       .map((i) => `${i.path.join(".")}: ${i.message}`)
       .join("; ")
     throw new Error(`ShiftLogQuery validation error: ${messages}`)
   }
-  return result.data
+  const { userId, dateRange, pagination, pageToken, taskFilter } = result.data
+
+  let page: number
+  let pageSize: number
+
+  if (pageToken) {
+    ({ page, pageSize } = decodePageToken(pageToken))
+  } else {
+    const pag = pagination ?? { page: 1, pageSize: 25 }
+    page = pag.page
+    pageSize = pag.pageSize
+  }
+
+  return { userId, dateRange, page, pageSize, taskFilter }
 }
 
 /**
@@ -78,11 +86,13 @@ export function encodePageToken(page: number, pageSize: number): string {
  */
 export function decodePageToken(token: string): { page: number; pageSize: number } {
   try {
-    const decoded = Buffer.from(token, "base64").toString()
+    const decoded = Buffer.from(token, "base64").toString("utf-8")
     const obj = JSON.parse(decoded)
     if (
       typeof obj.page !== "number" ||
-      typeof obj.pageSize !== "number"
+      typeof obj.pageSize !== "number" ||
+      obj.page < 1 ||
+      obj.pageSize < 1
     ) {
       throw new Error("invalid structure")
     }
