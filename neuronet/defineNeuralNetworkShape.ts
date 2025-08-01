@@ -13,20 +13,20 @@ export const Activations: Record<Activation, {
   derivative: (x: number) => number
 }> = {
   relu: {
-    fn: x => (x > 0 ? x : 0),
-    derivative: x => (x > 0 ? 1 : 0)
+    fn: x => Math.max(0, x),
+    derivative: x => (x > 0 ? 1 : 0),
   },
   sigmoid: {
     fn: x => 1 / (1 + Math.exp(-x)),
     derivative: x => {
       const s = 1 / (1 + Math.exp(-x))
       return s * (1 - s)
-    }
+    },
   },
   tanh: {
     fn: x => Math.tanh(x),
-    derivative: x => 1 - Math.pow(Math.tanh(x), 2)
-  }
+    derivative: x => 1 - Math.pow(Math.tanh(x), 2),
+  },
 }
 
 /**
@@ -35,14 +35,22 @@ export const Activations: Record<Activation, {
 const layerSchema = z.object({
   inputSize: z.number().int().positive(),
   outputSize: z.number().int().positive(),
-  activation: z.nativeEnum(Activations as any).default("relu"),
+  activation: z.enum(["relu", "sigmoid", "tanh"]).default("relu"),
   weights: z.array(z.array(z.number())).refine(arr => {
-    const rows = arr.length
-    const cols = rows > 0 ? arr[0].length : 0
-    return arr.every(row => row.length === cols)
+    // must be inputSize x outputSize
+    return arr.length > 0 && arr.every(row => row.length === arr[0].length)
   }, "Weights must be a rectangular matrix"),
-  biases: z.array(z.number())
+  biases: z.array(z.number()),
 })
+  .refine(cfg => cfg.weights.length === cfg.inputSize, {
+    message: "Weights row count must equal inputSize",
+  })
+  .refine(cfg => cfg.weights[0].length === cfg.outputSize, {
+    message: "Weights column count must equal outputSize",
+  })
+  .refine(cfg => cfg.biases.length === cfg.outputSize, {
+    message: "Biases length must equal outputSize",
+  })
 
 export type LayerConfig = z.infer<typeof layerSchema>
 
@@ -50,7 +58,7 @@ export type LayerConfig = z.infer<typeof layerSchema>
  * Neural network configuration schema
  */
 const networkConfigSchema = z.object({
-  layers: z.array(layerSchema).min(1)
+  layers: z.array(layerSchema).min(1),
 })
 
 export type NetworkConfig = z.infer<typeof networkConfigSchema>
@@ -72,9 +80,6 @@ export class Layer {
     this.activation = parsed.activation
     this.weights = parsed.weights
     this.biases = parsed.biases
-    if (this.weights.length !== this.inputSize || this.biases.length !== this.outputSize) {
-      throw new Error("Weights or biases dimensions do not match layer size")
-    }
   }
 
   /**
@@ -84,23 +89,28 @@ export class Layer {
     if (inputs.length !== this.inputSize) {
       throw new Error(`Expected ${this.inputSize} inputs, got ${inputs.length}`)
     }
-    const outputs: number[] = new Array(this.outputSize)
-    for (let j = 0; j < this.outputSize; j++) {
-      let sum = 0
+
+    return this.weights[0].map((_, j) => {
+      let sum = this.biases[j]
       for (let i = 0; i < this.inputSize; i++) {
         sum += inputs[i] * this.weights[i][j]
       }
-      sum += this.biases[j]
-      outputs[j] = Activations[this.activation].fn(sum)
-    }
-    return outputs
+      return Activations[this.activation].fn(sum)
+    })
   }
 
   /**
    * Compute derivative of activation given pre-activation values
    */
-  public activationDerivative(values: number[]): number[] {
-    return values.map(v => Activations[this.activation].derivative(v))
+  public activationDerivative(preActivations: number[]): number[] {
+    if (preActivations.length !== this.outputSize) {
+      throw new Error(
+        `Expected ${this.outputSize} pre-activations, got ${preActivations.length}`
+      )
+    }
+    return preActivations.map(v =>
+      Activations[this.activation].derivative(v)
+    )
   }
 }
 
@@ -112,26 +122,40 @@ export class NeuralNetwork {
 
   constructor(config: NetworkConfig) {
     const parsed = networkConfigSchema.parse(config)
-    this.layers = parsed.layers.map(lc => new Layer(lc))
+    this.layers = parsed.layers.map(layerCfg => new Layer(layerCfg))
   }
 
   /**
    * Compute a prediction for a single input vector
    */
   public predict(input: number[]): number[] {
-    return this.layers.reduce<number[]>((acc, layer) => layer.forward(acc), input)
+    return this.layers.reduce<number[]>(
+      (acc, layer) => layer.forward(acc),
+      input
+    )
   }
 
   /**
-   * Expose layer internals for training (weights & biases)
+   * Safely predict, returns undefined on error
+   */
+  public tryPredict(input: number[]): number[] | undefined {
+    try {
+      return this.predict(input)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Expose layer configs for introspection or checkpointing
    */
   public getLayerConfigs(): LayerConfig[] {
     return this.layers.map(layer => ({
       inputSize: layer.inputSize,
       outputSize: layer.outputSize,
       activation: layer.activation,
-      weights: JSON.parse(JSON.stringify((layer as any).weights)),
-      biases: JSON.parse(JSON.stringify((layer as any).biases))
+      weights: layer["weights"].map(row => [...row]),
+      biases: [...layer["biases"]],
     }))
   }
 }
