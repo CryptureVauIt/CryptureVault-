@@ -1,3 +1,5 @@
+import axios from "axios"
+import pLimit from "p-limit"
 import { z } from "zod"
 
 /**
@@ -42,4 +44,66 @@ export interface DispatchSummary {
   successes: number
   failures: number
   results: RunnerResult[]
+}
+
+/**
+ * Validates config and params, throwing if invalid.
+ */
+export function validateDispatchInputs(
+  config: unknown,
+  params: unknown
+): { config: RunnerSetConfig; params: DispatchParams } {
+  const parsedConfig = runnerSetConfigSchema.parse(config)
+  const parsedParams = dispatchParamsSchema.parse(params)
+  return { config: parsedConfig, params: parsedParams }
+}
+
+/**
+ * Dispatches the work item to all runners in parallel, with per-runner concurrency and timeout.
+ *
+ * @param rawConfig  Unvalidated RunnerSetConfig-like object
+ * @param rawParams  Unvalidated DispatchParams-like object
+ */
+export async function dispatchWorkItem(
+  rawConfig: unknown,
+  rawParams: unknown
+): Promise<DispatchSummary> {
+  const { config, params } = validateDispatchInputs(rawConfig, rawParams)
+  const { runnerEndpoints, maxConcurrencyPerRunner, taskTimeoutMs } = config
+
+  // per-runner limiter
+  const limit = pLimit(maxConcurrencyPerRunner)
+  const results: RunnerResult[] = []
+
+  // prepare tasks
+  const tasks = runnerEndpoints.map(endpoint =>
+    limit(async () => {
+      const result: RunnerResult = { endpoint, success: false }
+      try {
+        const resp = await axios.post(
+          endpoint,
+          params.payload,
+          { timeout: taskTimeoutMs }
+        )
+        result.success = true
+        result.response = resp.data
+      } catch (err: any) {
+        result.error = err.message
+      } finally {
+        results.push(result)
+      }
+    })
+  )
+
+  await Promise.all(tasks)
+
+  const successes = results.filter(r => r.success).length
+  const failures = results.length - successes
+
+  return {
+    total: results.length,
+    successes,
+    failures,
+    results,
+  }
 }
