@@ -2,7 +2,8 @@ import { Connection, PublicKey, Transaction, ConfirmOptions, BlockhashWithExpiry
 import { EventEmitter } from "events"
 import { z } from "zod"
 
-// Configuration schema for LaunchKitService
+// --- Zod Schemas to validate config and parameters ---
+
 const launchKitConfigSchema = z.object({
   endpoint: z.string().url(),
   commitment: z.enum(["processed", "confirmed", "finalized"]).default("confirmed"),
@@ -14,10 +15,8 @@ const launchKitConfigSchema = z.object({
       .returns(z.promise(z.instanceof(Transaction))),
   }),
 })
-
 type LaunchKitConfig = z.infer<typeof launchKitConfigSchema>
 
-// Parameters for scheduling a transaction
 const scheduleParamsSchema = z.object({
   tx: z.instanceof(Transaction),
   executeAtSlot: z.number().int().nonnegative(),
@@ -30,8 +29,20 @@ const scheduleParamsSchema = z.object({
     })
     .optional(),
 })
-
 type ScheduleParams = z.infer<typeof scheduleParamsSchema>
+
+// --- Typed Events ---
+
+interface LaunchKitServiceEvents {
+  scheduled: (jobId: string, slot: number) => void
+  canceled: (jobId: string) => void
+  executed: (jobId: string, signature: string) => void
+  retry: (jobId: string, attempt: number) => void
+  error: (jobId: string, err: Error) => void
+  finalized: (jobId: string, signature: string) => void
+}
+
+// --- Internal Job Shape ---
 
 interface ScheduledJob {
   id: string
@@ -55,8 +66,7 @@ export class LaunchKitService extends EventEmitter {
     const { endpoint, commitment, payerKeypair } = launchKitConfigSchema.parse(rawConfig)
     this.connection = new Connection(endpoint, { commitment })
     this.payer = payerKeypair
-    // cleanup on exit
-    process.once('beforeExit', () => this.shutdown())
+    process.once("beforeExit", () => this.shutdown())
   }
 
   /**
@@ -64,83 +74,110 @@ export class LaunchKitService extends EventEmitter {
    */
   public async scheduleTransaction(raw: unknown): Promise<string> {
     const { tx, executeAtSlot, confirmOptions } = scheduleParamsSchema.parse(raw)
+
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
-    const options = {
+    const opts: ConfirmOptions & { maxRetries: number } = {
       commitment: this.connection.commitment,
       maxRetries: confirmOptions?.maxRetries ?? 3,
-      ...(confirmOptions ?? {}),
+      ...confirmOptions,
     }
-    const listenerId = this.connection.onSlotChange(async slotInfo => {
+
+    // Attach slot listener
+    const listenerId = this.connection.onSlotChange(slotInfo => {
       if (slotInfo.slot >= executeAtSlot) {
-        await this.attemptExecution(id)
+        void this.attemptExecution(id)
       }
     })
 
-    this.jobs.set(id, { id, executeAtSlot, tx, listenerId, confirmOptions: options, attempts: 0 })
-    this.emit('scheduled', { id, executeAtSlot })
+    this.jobs.set(id, { id, executeAtSlot, tx, listenerId, confirmOptions: opts, attempts: 0 })
+    this.emit("scheduled", id, executeAtSlot)
     return id
   }
 
   /** Cancel a scheduled job */
-  public async cancel(id: string): Promise<boolean> {
+  public cancel(id: string): boolean {
     const job = this.jobs.get(id)
     if (!job) return false
+
     this.connection.removeSlotChangeListener(job.listenerId)
     this.jobs.delete(id)
-    this.emit('canceled', id)
+    this.emit("canceled", id)
     return true
   }
 
-  /** List pending schedules */
+  /** List all pending job IDs */
   public listScheduled(): string[] {
-    return [...this.jobs.keys()]
+    return Array.from(this.jobs.keys())
   }
 
+  /** Internal: attempt to execute a job, with retries */
   private async attemptExecution(id: string): Promise<void> {
     const job = this.jobs.get(id)
     if (!job) return
+
     job.attempts++
     try {
-      await this.executeNow(job)
-      this.emit('executed', { id })
+      const signature = await this.executeNow(job)
+      this.emit("executed", id, signature)
     } catch (err) {
       if (job.attempts <= job.confirmOptions.maxRetries) {
-        this.emit('retry', { id, attempt: job.attempts })
+        this.emit("retry", id, job.attempts)
       } else {
-        this.emit(`error:${id}`, err)
+        this.emit("error", id, err as Error)
         this.cleanupJob(job)
       }
     }
   }
 
-  private async executeNow(job: ScheduledJob): Promise<void> {
-    const { tx, listenerId, confirmOptions } = job
-    this.connection.removeSlotChangeListener(listenerId)
+  /** Internal: sign, send, confirm the transaction immediately */
+  private async executeNow(job: ScheduledJob): Promise<string> {
+    // cleanup listener & job entry before execution
+    this.connection.removeSlotChangeListener(job.listenerId)
     this.jobs.delete(job.id)
 
-    tx.feePayer = this.payer.publicKey
-    const latest = await this.connection.getLatestBlockhash({ commitment: confirmOptions.commitment })
-    tx.recentBlockhash = (latest as BlockhashWithExpiryBlockHeight).blockhash
+    // set fee payer & recent blockhash
+    job.tx.feePayer = this.payer.publicKey
+    const latest = await this.connection.getLatestBlockhash({ commitment: job.confirmOptions.commitment })
+    job.tx.recentBlockhash = (latest as BlockhashWithExpiryBlockHeight).blockhash
 
-    const signedTx = await this.payer.signTransaction(tx)
-    const raw = signedTx.serialize()
-    const signature = await this.connection.sendRawTransaction(raw, confirmOptions)
-    await this.connection.confirmTransaction(signature, confirmOptions)
+    // sign & serialize
+    const signed = await this.payer.signTransaction(job.tx)
+    const raw = signed.serialize()
 
-    this.emit('finalized', { id: job.id, signature })
+    // send & confirm
+    const sig = await this.connection.sendRawTransaction(raw, job.confirmOptions)
+    await this.connection.confirmTransaction(sig, job.confirmOptions)
+
+    this.emit("finalized", job.id, sig)
+    return sig
   }
 
-  /** Graceful shutdown: remove all listeners */
-  private shutdown() {
+  /** Remove all listeners & clear pending jobs */
+  private shutdown(): void {
     for (const job of this.jobs.values()) {
       this.connection.removeSlotChangeListener(job.listenerId)
     }
     this.jobs.clear()
   }
 
-  /** Helper to cleanup after max retries */
-  private cleanupJob(job: ScheduledJob) {
+  /** Clean up after exhausting retries */
+  private cleanupJob(job: ScheduledJob): void {
     this.connection.removeSlotChangeListener(job.listenerId)
     this.jobs.delete(job.id)
+  }
+
+  // Override typed `on` & `off`
+  public override on<K extends keyof LaunchKitServiceEvents>(
+    event: K,
+    listener: LaunchKitServiceEvents[K]
+  ): this {
+    return super.on(event, listener)
+  }
+
+  public override off<K extends keyof LaunchKitServiceEvents>(
+    event: K,
+    listener: LaunchKitServiceEvents[K]
+  ): this {
+    return super.off(event, listener)
   }
 }
