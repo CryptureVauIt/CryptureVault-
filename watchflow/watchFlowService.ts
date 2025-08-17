@@ -1,5 +1,10 @@
-
-import { Connection, PublicKey, ConfirmedSignatureInfo } from "@solana/web3.js"
+import {
+  Connection,
+  PublicKey,
+  ConfirmedSignatureInfo,
+  ParsedInstruction,
+  ParsedTransactionWithMeta
+} from "@solana/web3.js"
 
 export interface FlowEvent {
   signature: string
@@ -10,41 +15,55 @@ export interface FlowEvent {
 }
 
 export class WatchFlowService {
-  private conn: Connection
+  private readonly conn: Connection
 
   constructor(rpcUrl: string) {
     this.conn = new Connection(rpcUrl, "confirmed")
   }
 
   /**
-   * Stream and classify recent token transfer events for a given wallet.
+   * Fetch recent SPL token transfer events for a specific wallet and mint.
+   * @param wallet Wallet address to watch
+   * @param mint Token mint address to filter
+   * @param limit Number of recent transactions to inspect
    */
-  async fetchFlow(
-    wallet: string,
-    mint: string,
-    limit = 100
-  ): Promise<FlowEvent[]> {
-    const walletPub = new PublicKey(wallet)
-    const sigs: ConfirmedSignatureInfo[] = await this.conn.getSignaturesForAddress(walletPub, { limit })
+  async fetchFlow(wallet: string, mint: string, limit = 100): Promise<FlowEvent[]> {
+    const walletPubkey = new PublicKey(wallet)
+    const mintAddress = mint.toString()
+    const signatures: ConfirmedSignatureInfo[] = await this.conn.getSignaturesForAddress(walletPubkey, { limit })
+
     const events: FlowEvent[] = []
 
-    for (const { signature, blockTime } of sigs) {
+    for (const { signature, blockTime } of signatures) {
       if (!blockTime) continue
-      const tx = await this.conn.getParsedConfirmedTransaction(signature)
-      if (!tx) continue
-      for (const instr of tx.transaction.message.instructions as any[]) {
-        if (instr.program === "spl-token" && instr.parsed?.type === "transfer") {
-          const { source, destination, amount, mint: txMint } = instr.parsed.info
-          if (txMint !== mint) continue
-          const direction: "in" | "out" = destination === walletPub.toBase58() ? "in" : "out"
-          events.push({
-            signature,
-            address: direction === "in" ? source : destination,
-            timestamp: blockTime * 1000,
-            direction,
-            amount: Number(amount)
-          })
+
+      const parsedTx: ParsedTransactionWithMeta | null =
+        await this.conn.getParsedConfirmedTransaction(signature)
+
+      if (!parsedTx) continue
+
+      const instructions = parsedTx.transaction.message.instructions as ParsedInstruction[]
+
+      for (const instr of instructions) {
+        if (
+          instr.program !== "spl-token" ||
+          instr.parsed?.type !== "transfer" ||
+          instr.parsed?.info?.mint !== mintAddress
+        ) {
+          continue
         }
+
+        const { source, destination, amount } = instr.parsed.info
+        const direction: "in" | "out" = destination === wallet ? "in" : "out"
+        const counterparty = direction === "in" ? source : destination
+
+        events.push({
+          signature,
+          address: counterparty,
+          timestamp: blockTime * 1000,
+          direction,
+          amount: Number(amount)
+        })
       }
     }
 
