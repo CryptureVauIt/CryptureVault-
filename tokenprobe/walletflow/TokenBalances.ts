@@ -9,42 +9,48 @@ import {
 } from "./defineBalanceQueryShape"
 
 /**
- * A single token balance entry
+ * Represents a token balance entry for a specific SPL token mint.
  */
 export interface TokenBalance {
-  mint: string
-  raw: number
-  uiAmount: number
-  decimals: number
+  mint: string         // Mint address
+  raw: number          // Raw balance in base units
+  uiAmount: number     // Human-readable balance
+  decimals: number     // Decimals for the token
 }
 
 /**
- * Main function to retrieve balances for a set of SPL tokens
+ * Fetches SPL token balances for a specific wallet and set of mints.
+ *
+ * Handles network selection, filters (minBalance, zero balances), and pagination.
  */
 export async function retrieveTokenBalances(
   input: unknown
 ): Promise<TokenBalance[]> {
+  // Validate and extract structured query params
   const { walletAddress, tokenMints, options } = parseBalanceQuery(input)
 
-  // choose endpoint based on requested network
+  // Select RPC endpoint based on requested network
   const endpoint =
     options.network === "devnet"
       ? "https://api.devnet.solana.com"
       : "https://api.mainnet-beta.solana.com"
-  const connection = new Connection(endpoint, "confirmed")
 
+  const connection = new Connection(endpoint, "confirmed")
   const ownerKey = new PublicKey(walletAddress)
+
   const results: TokenBalance[] = []
 
-  // for each token mint, fetch all token accounts and sum their balances
+  // Loop through each requested mint address
   for (const mint of tokenMints) {
     let totalRaw = 0
     let decimals = 0
 
     try {
+      // Get all parsed token accounts for the owner with the specified mint
       const resp = await connection.getParsedTokenAccountsByOwner(ownerKey, {
         mint: new PublicKey(mint),
       })
+
       for (const { account } of resp.value) {
         const data = account.data as ParsedAccountData
         const parsed = data.parsed.info
@@ -53,17 +59,19 @@ export async function retrieveTokenBalances(
         totalRaw += amount
       }
     } catch (err) {
-      console.error(`Failed to fetch accounts for ${mint}:`, err)
-      continue
+      console.error(`Failed to fetch accounts for mint ${mint}:`, err)
+      continue // Skip this mint on failure
     }
 
-    // apply minBalance filter
+    // Skip zero balances if not explicitly requested
     if (
       totalRaw === 0 &&
       !options.includeZeroBalances
     ) {
       continue
     }
+
+    // Skip if below specified minimum threshold
     if (
       options.minBalance !== undefined &&
       totalRaw < options.minBalance
@@ -71,12 +79,18 @@ export async function retrieveTokenBalances(
       continue
     }
 
-    // convert to human-readable
+    // Convert raw amount into human-readable units
     const uiAmount = totalRaw / Math.pow(10, decimals)
-    results.push({ mint, raw: totalRaw, uiAmount, decimals })
+
+    results.push({
+      mint,
+      raw: totalRaw,
+      uiAmount,
+      decimals,
+    })
   }
 
-  // optional client‐side pagination
+  // Apply client-side pagination if specified
   if (options.pagination) {
     const { page, pageSize } = options.pagination
     const start = (page - 1) * pageSize
