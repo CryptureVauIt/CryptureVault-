@@ -6,16 +6,16 @@ import { PublicKey } from "@solana/web3.js"
  */
 const PublicKeySchema = z
   .string()
-  .min(32, "too short")
-  .max(44, "too long")
+  .min(32, "Public key too short")
+  .max(44, "Public key too long")
   .refine((s) => {
     try {
       new PublicKey(s)
       return true
-    } catch {
+    } catch (e) {
       return false
     }
-  }, "invalid Solana public key")
+  }, "Invalid Solana public key")
   .transform((s) => new PublicKey(s))
 
 /**
@@ -30,9 +30,13 @@ export const watchLinkQuerySchema = z
     destinationAddress: PublicKeySchema,
 
     /** Minimum lamports to consider a link event */
-    minLamports: z.number().int().nonnegative().default(0),
+    minLamports: z
+      .number()
+      .int()
+      .nonnegative("Minimum lamports must be non-negative")
+      .default(0),
 
-    /** Cluster to connect to */
+    /** Cluster to connect to (default: mainnet) */
     network: z.enum(["mainnet", "devnet"]).default("mainnet"),
   })
   .describe("Parameters for filtering transfer events between two wallets")
@@ -45,10 +49,15 @@ export type WatchLinkQuery = z.infer<typeof watchLinkQuerySchema>
  */
 export function parseWatchLinkQuery(input: unknown): WatchLinkQuery {
   const parsed = watchLinkQuerySchema.safeParse(input)
+
   if (!parsed.success) {
-    // rethrow full ZodError so callers can inspect `issues`
-    throw parsed.error
+    const errorMessage = parsed.error.issues
+      .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+      .join("; ")
+    // Rethrow detailed error for better inspection
+    throw new ZodError(parsed.error.issues, errorMessage)
   }
+
   return parsed.data
 }
 
