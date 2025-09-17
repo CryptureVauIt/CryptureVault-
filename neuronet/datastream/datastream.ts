@@ -7,17 +7,13 @@ import {
 } from "@solana/web3.js"
 import { EventEmitter } from "events"
 
-/**
- * Configuration schema for a data stream subscription
- */
+
 const dataStreamSchema = z.object({
-  /** Base58 wallet address to monitor */
   walletAddress: z
     .string()
     .min(32, "address too short")
     .max(44, "address too long")
     .regex(/^[1-9A-HJ-NP-Za-km-z]+$/, "invalid Base58 address"),
-  /** SPL token mint address to filter */
   tokenMint: z
     .string()
     .min(32, "mint too short")
@@ -31,9 +27,6 @@ const dataStreamSchema = z.object({
 
 export type DataStreamConfig = z.infer<typeof dataStreamSchema>
 
-/**
- * Parses and validates raw input into a DataStreamConfig
- */
 export function parseDataStreamConfig(raw: unknown): DataStreamConfig {
   const result = dataStreamSchema.safeParse(raw)
   if (!result.success) {
