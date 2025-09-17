@@ -1,9 +1,6 @@
 import { z } from "zod"
 
-/**
- * Raw input schema for shift log queries:
- * - either `pageToken` (opaque cursor) or `pagination` may be provided
- */
+
 const shiftLogQueryRawSchema = z
   .object({
     userId: z.string().uuid("userId must be a valid UUID"),
@@ -46,10 +43,6 @@ export interface ShiftLogQuery {
   taskFilter?: string
 }
 
-/**
- * Parses and validates user input into a structured ShiftLogQuery,
- * decoding `pageToken` if present.
- */
 export function parseShiftLogQuery(input: unknown): ShiftLogQuery {
   const result = shiftLogQueryRawSchema.safeParse(input)
   if (!result.success) {
@@ -74,16 +67,12 @@ export function parseShiftLogQuery(input: unknown): ShiftLogQuery {
   return { userId, dateRange, page, pageSize, taskFilter }
 }
 
-/**
- * Creates an opaque page token from page and pageSize
- */
+
 export function encodePageToken(page: number, pageSize: number): string {
   return Buffer.from(JSON.stringify({ page, pageSize })).toString("base64")
 }
 
-/**
- * Decodes an opaque page token back into page and pageSize
- */
+
 export function decodePageToken(token: string): { page: number; pageSize: number } {
   try {
     const decoded = Buffer.from(token, "base64").toString("utf-8")
@@ -102,9 +91,7 @@ export function decodePageToken(token: string): { page: number; pageSize: number
   }
 }
 
-/**
- * Represents a single shift log entry
- */
+
 export interface ShiftLog {
   id: string
   userId: string
